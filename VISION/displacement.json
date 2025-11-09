@@ -1,7 +1,9 @@
 {
+    "timestamp": "2025-11-09 09:19:44",
     "laptop_id": 1,
-    "is_a_detected": false,
-    "is_b_detected": false,
-    "dista": 105.60563585077938,
-    "distb": 85.798187838917
+    "is_a_detected": true,
+    "is_b_detected": true,
+    "displacement_a": 30.843665674568825,
+    "displacement_b": 32.87489168186522,
+    "peak": -47.777837775744686
 }
