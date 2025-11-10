@@ -19,7 +19,7 @@ tracker = None
 calibrate_topx_1 = calibrate_topy_1 = 0.0
 calibrate_topx_2 = calibrate_topy_2 = 0.0
 
-# array of calibrate values
+# array size 3 of calibrate base values
 calibrate_basex = []
 calibrate_basey = []
 
@@ -42,7 +42,6 @@ class Marker:
         self.x = self.y = self.z = 0.0
         self.roll = self.pitch = self.yaw = 0.0
         self.detected = False
-
 
 class MarkerTracker:
     def __init__(self, timeout=1.0):
@@ -75,7 +74,6 @@ class MarkerTracker:
         for m in self.markers.values():
             if not m.detected and (now - m.last_seen > self.timeout):
                 m.reset()
-
 
 # ====== Camera Setup ======
 def camera_connect(idx):
@@ -157,13 +155,20 @@ def detection_loop():
 
             dx = dx_2 - dx_1
             dy = dy_2 - dy_1
-            distance_2d = dy  # arah positif/negatif tetap dipertahankan
+
+            if mode_var.get() == "MODE_X":
+                distance_2d = dx
+            elif mode_var.get() == "MODE_X_Y":
+                distance_2d = math.sqrt(dx**2 + dy**2) * (1 if dy >= 0 else -1)
+            elif mode_var.get() == "MODE_Y":
+                distance_2d = dy
 
             # === Deteksi arah & peak ===
             global last_sign, temp_values, peak_data
 
             sign = 1 if distance_2d > 0 else -1
             temp_values.append(distance_2d)
+            print(temp_values)
 
             # Cek pergantian arah (dengan jeda 2 frame untuk stabilitas)
             if sign != last_sign and len(temp_values) > 2:
@@ -182,9 +187,8 @@ def detection_loop():
                         "laptop_id": LAPTOP_ID,
                         "is_a_detected": tracker[1].detected,
                         "is_b_detected": tracker[2].detected,
-                        "displacement_a": float(tracker[1].y - calibrate_topy_1),
-                        "displacement_b": float(tracker[2].y - calibrate_topy_2),
-                        "peak": peak_val
+                        "displacement_a": float(distance_2d),
+                        "displacement_b": float(tracker[2].y - calibrate_topy_2)
                     }
 
                     peak_data.append(data_entry)
@@ -228,15 +232,23 @@ def detection_loop():
 # ====== GUI ======
 def start_gui():
     global entry_id, label_status
+    global mode_var
 
     root = tk.Tk()
     root.title("Marker Control Panel")
-    root.geometry("320x320")
+    root.geometry("320x360")
 
     tk.Label(root, text="Laptop ID:").pack(pady=5)
     entry_id = tk.Entry(root, width=10)
     entry_id.insert(0, "1")
     entry_id.pack(pady=5)
+
+    # add mode selection
+    tk.Label(root, text="Select Mode:").pack(pady=5)
+    mode_var = tk.StringVar(value="MODE_X_Y_Z")
+    modes = [("MODE_X", "MODE_X"), ("MODE_X_Y", "MODE_X_Y"), ("MODE_Y", "MODE_Y"), ("MODE_X_Y_Z", "MODE_X_Y_Z")]
+    for text, mode in modes:
+        tk.Radiobutton(root, text=text, variable=mode_var, value=mode).pack(anchor=tk.W)
 
     btn_start = tk.Button(root, text="Start Detection", bg="lightblue", command=start_detection)
     btn_start.pack(pady=5)
@@ -280,9 +292,10 @@ def do_calibrate():
         calibrate_topx_1 = tracker[1].x
         calibrate_topy_2 = tracker[2].y
         calibrate_topx_2 = tracker[2].x
-        for i in calibrate_basex:
-            calibrate_basex[i] = tracker[i].x
-            calibrate_basey[i] = tracker[i].y
+        # for 1, 2
+        for i in [1, 2]:
+            calibrate_basex.append(tracker[i].x)
+            calibrate_basey.append(tracker[i].y)
         label_status.config(text="Status: ✅ Calibrated", fg="green")
         messagebox.showinfo("Calibration", "Kalibrasi berhasil!")
     else:
@@ -295,6 +308,7 @@ def exit_program():
     running = False
     if  cap is not None:
         cap.release()
+    time.sleep(0.1)
     cv2.destroyAllWindows()
     os._exit(0)
 
