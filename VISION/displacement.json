@@ -1,8 +1,8 @@
 {
-    "timestamp": "2025-11-10 08:17:31",
+    "timestamp": "2025-11-14 14:41:13",
     "laptop_id": 1,
     "is_a_detected": true,
     "is_b_detected": true,
-    "displacement_a": -14.470468657557404,
-    "displacement_b": -15.001711490826011
+    "displacement_a": -30.258153065508303,
+    "displacement_b": -6.002007575048964
 }

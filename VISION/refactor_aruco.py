@@ -25,6 +25,7 @@ import tkinter as tk
 from tkinter import messagebox
 import sys
 from collections import deque
+import requests
 
 # ====== Configuration ======
 CAMERA_INDEX_DEFAULT = 1
@@ -141,6 +142,10 @@ class CameraHandler(threading.Thread):
         self.x_base = 0.0
         self.y_base = 0.0
         self.z_base = 0.0
+
+        self.prev_timer = [0.0, 0.0]
+
+        self.calibrated = [False] * 6
 
         # GUI mode var reference (set by GUI)
         self.mode_var = None
@@ -287,7 +292,7 @@ class CameraHandler(threading.Thread):
 
             # ----- CRITICAL: Preserve exact logic using BASE_MARKER -----
             base = (self.laptop_id - 1) * 5
-            if (self.tracker[base + 1].detected or self.tracker[base + 2].detected or self.tracker[base + 3].detected) and (self.tracker[base + 4].detected or self.tracker[base + 5].detected):
+            if (self.tracker[base + 1].detected or self.tracker[base + 2].detected or self.tracker[base + 3].detected):
                 
 
                 for i in range(1, 6):
@@ -296,6 +301,9 @@ class CameraHandler(threading.Thread):
                         self.tracker_calibrated_x[i] = self.tracker.markers[real_index].x - self.calibrate_values_x[i]
                         self.tracker_calibrated_y[i] = self.tracker.markers[real_index].y - self.calibrate_values_y[i]
                         self.tracker_calibrated_z[i] = self.tracker.markers[real_index].z - self.calibrate_values_z[i]
+
+                        if i == 4 or i == 5: 
+                            self.prev_timer[5-i] = time.time()
 
                 if self.tracker[base + 1].detected:
                     self.x_base = self.tracker_calibrated_x[1]
@@ -310,13 +318,19 @@ class CameraHandler(threading.Thread):
                     self.y_base = self.tracker_calibrated_y[3]
                     self.z_base = self.tracker_calibrated_z[3]
 
-                dx_top = self.tracker_calibrated_x[5] - self.x_base
-                dy_top = self.tracker_calibrated_y[5] - self.y_base
-                dz_top = self.tracker_calibrated_z[5] - self.z_base
+                if self.calibrated[5]:
+                    dx_top = self.tracker_calibrated_x[5] - self.x_base
+                    dy_top = self.tracker_calibrated_y[5] - self.y_base
+                    dz_top = self.tracker_calibrated_z[5] - self.z_base
+                else:
+                    dx_top = dy_top = dz_top = 0.0
 
-                dx_low = self.tracker_calibrated_x[4] - self.x_base
-                dy_low = self.tracker_calibrated_y[4] - self.y_base
-                dz_low = self.tracker_calibrated_z[4] - self.z_base
+                if self.calibrated[4]:
+                    dx_low = self.tracker_calibrated_x[4] - self.x_base
+                    dy_low = self.tracker_calibrated_y[4] - self.y_base
+                    dz_low = self.tracker_calibrated_z[4] - self.z_base
+                else:
+                    dx_low = dy_low = dz_low = 0.0
 
                 try:
                     mode = self.mode_var.get()
@@ -392,18 +406,30 @@ class CameraHandler(threading.Thread):
                                 except Exception as e:
                                     print(f"Append displacement_log.csv failed: {e}")
 
+            if self.prev_timer[0] != 0.0 and (time.time() - self.prev_timer[0]) > 1.0:
+                self.last_sign[0] = 0
+                self.peak_value[0] = None
+                self.temp_values[0].clear()
+            if self.prev_timer[1] != 0.0 and (time.time() - self.prev_timer[1]) > 1.0:
+                self.last_sign[1] = 0
+                self.peak_value[1] = None
+                self.temp_values[1].clear()
+
             # overlay peaks
             if self.peak_value[0] is not None:
                 try:
-                    cv2.putText(frame, f"peak top ={self.peak_value[0]:.2f}mm", (50, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.putText(frame, f"peak displacement top ={self.peak_value[0]:.2f}mm", (50, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 except Exception:
                     pass
             if self.peak_value[1] is not None:
                 try:
-                    cv2.putText(frame, f"peak bottom ={self.peak_value[1]:.2f}mm", (50, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.putText(frame, f"peak displacement bottom ={self.peak_value[1]:.2f}mm", (50, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 except Exception:
                     pass
 
+            # add line intersection x = 0 y = 0
+            cv2.line(frame, (FRAME_WIDTH // 2, 0), (FRAME_WIDTH // 2, FRAME_HEIGHT), (255, 255, 0), 1)
+            cv2.line(frame, (0, FRAME_HEIGHT // 2), (FRAME_WIDTH, FRAME_HEIGHT // 2), (255, 255, 0), 1)
             # show frame
             try:
                 cv2.imshow("Marker Detection", frame)
@@ -442,7 +468,83 @@ class CameraHandler(threading.Thread):
                 self.calibrate_values_x[i] = src.x
                 self.calibrate_values_y[i] = src.y
                 self.calibrate_values_z[i] = src.z
+                self.calibrated[i] = True
+            else:
+                self.calibrated[i] = False
 
+class DataSender(threading.Thread):
+    def __init__(self, camera_handler, 
+                 api_url="http://localhost/detector-getaran/api/receive_camera_data.php",
+                 retry_interval=1.0,
+                 max_buffer=100):
+        """
+        :param camera_handler: referensi ke CameraHandler (punya displacement dan deteksi)
+        :param api_url: alamat PHP endpoint
+        :param retry_interval: waktu tunggu sebelum retry jika gagal
+        :param max_buffer: jumlah maksimal data yang disimpan lokal
+        """
+        super().__init__(daemon=True)
+        self.camera_handler = camera_handler
+        self.api_url = api_url
+        self.retry_interval = retry_interval
+        self.buffer = deque(maxlen=max_buffer)
+        self._stop_event = threading.Event()
+        self.last_sent_data = None
+
+    def stop(self):
+        self._stop_event.set()
+
+    def _build_data(self):
+        """Ambil data terbaru dari kamera"""
+        return {
+            "laptop_id": self.camera_handler.laptop_id,
+            "dista": float(self.camera_handler.peak_value[0]) if self.camera_handler.peak_value[0] is not None else 0.0,
+            "distb": float(self.camera_handler.peak_value[1]) if self.camera_handler.peak_value[1] is not None else 0.0,
+            "is_a_detected": bool(
+                self.camera_handler.tracker.markers.get((self.camera_handler.laptop_id - 1) * 5 + 5)
+                and self.camera_handler.tracker.markers[(self.camera_handler.laptop_id - 1) * 5 + 5].detected
+            ),
+            "is_b_detected": bool(
+                self.camera_handler.tracker.markers.get((self.camera_handler.laptop_id - 1) * 5 + 4)
+                and self.camera_handler.tracker.markers[(self.camera_handler.laptop_id - 1) * 5 + 4].detected
+            )
+        }
+
+    def _send_to_server(self, data):
+        """Kirim ke server PHP, return True kalau sukses"""
+        try:
+            response = requests.post(self.api_url, json=data, timeout=1)
+            if response.status_code == 200:
+                print(f"✅ Sent: {data}")
+                return True
+            else:
+                print(f"⚠️ Server returned {response.status_code}: {response.text[:100]}")
+                return False
+        except requests.RequestException as e:
+            print(f"❌ Send error: {e}")
+            return False
+
+    def run(self):
+        while not self._stop_event.is_set():
+            # ambil data terbaru dari kamera
+            new_data = self._build_data()
+
+            # hanya tambahkan ke buffer jika berbeda dari sebelumnya
+            if new_data != self.last_sent_data:
+                self.buffer.append(new_data)
+                self.last_sent_data = new_data.copy()
+
+            # jika buffer ada isinya, kirim dari yang paling lama
+            if self.buffer:
+                current = self.buffer[0]
+                if self._send_to_server(current):
+                    self.buffer.popleft()  # sukses, hapus dari buffer
+                else:
+                    # gagal kirim → tunggu sebentar sebelum mencoba lagi
+                    time.sleep(self.retry_interval)
+                    continue
+
+            time.sleep(0.01)  # mencegah CPU 100%
 
 # ====== GUI (Tkinter) - starts/stops the CameraHandler thread ======
 class MarkerGUI:
@@ -501,6 +603,10 @@ class MarkerGUI:
         self.camera_thread = CameraHandler(camera_index=cam_idx, laptop_id=laptop_id)
         self.camera_thread.mode_var = self.mode_var
         self.camera_thread.start()
+
+        self.DataSenderThread = DataSender(camera_handler=self.camera_thread)
+        self.DataSenderThread.start()
+
         self.label_status.config(text=f"Status: Detection Running (ID={laptop_id})", fg="green")
 
     def do_calibrate(self):
@@ -514,6 +620,11 @@ class MarkerGUI:
 
     def exit_program(self):
         # safe shutdown: signal thread to stop and join briefly
+        if hasattr(self, "DataSenderThread") and self.DataSenderThread.is_alive():
+            self.DataSenderThread.stop()
+            self.DataSenderThread.join(timeout=2.0)
+
+
         if self.camera_thread and self.camera_thread.is_alive():
             try:
                 self.camera_thread.stop()
@@ -539,7 +650,6 @@ class MarkerGUI:
                 s = "Markers: " + ", ".join([f"{mid}:{'1' if m.detected else '0'}" for mid, m in snap.items()])
                 self.label_status.config(text=s, fg="green")
         self.root.after(500, self.update_ui)
-
 
 if __name__ == "__main__":
     root = tk.Tk()
